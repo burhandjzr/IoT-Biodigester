@@ -1,0 +1,101 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+
+HardwareSerial Mega(2);
+
+// ================= WIFI =====================
+const char* ssid = " ";
+const char* password = " ";
+
+// =============== SUPABASE ====================
+String SUPABASE_URL = " ";
+String SUPABASE_KEY = " ";
+
+// =============================================
+void setup() {
+  Serial.begin(115200);
+  Mega.begin(9600, SERIAL_8N1, 16, 17);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(250);
+  }
+  Serial.println("\nWiFi Connected!");
+}
+
+// =============================================
+void loop() {
+
+  if (Mega.available()) {
+
+    String raw = Mega.readStringUntil('\n');
+    raw.trim();
+
+    Serial.print("RAW diterima: ");
+    Serial.println(raw);
+
+    // ================= PARSE STRING ===================
+    float gas1, gas2, suhu, ph, press1, press2;
+    int water;
+
+    if (sscanf(raw.c_str(), "%f %f %f %f %f %f %d",
+               &gas1, &gas2, &suhu, &ph, &press1, &press2, &water) == 7) {
+
+      Serial.println("Parsing OK, mengirim ke Supabase...");
+      sendToSupabase(gas1, gas2, suhu, ph, press1, press2, water);
+
+    } else {
+      Serial.println("ERROR PARSING DATA!");
+    }
+  }
+}
+
+// ================= KIRIM KE SUPABASE ===================
+void sendToSupabase(float gas1, float gas2, float suhu, float ph, float press1, float press2, int water) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi Terputus! Tidak mengirim");
+    return;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();  // bypass sertifikat SSL Supabase
+
+  HTTPClient http;
+  http.begin(client, SUPABASE_URL);
+
+  http.addHeader("apikey", SUPABASE_KEY);
+  http.addHeader("Authorization", "Bearer " + SUPABASE_KEY);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Prefer", "return=minimal");
+
+  // =============== Hasil Pharsing ===============
+  String json = "{";
+  json += "\"gas1\": " + String(gas1, 2) + ",";
+  json += "\"gas2\": " + String(gas2, 2) + ",";
+  json += "\"suhu\": " + String(suhu, 2) + ",";
+  json += "\"ph\": " + String(ph, 2) + ",";
+  json += "\"press1\": " + String(press1, 2) + ",";
+  json += "\"press2\": " + String(press2, 2) + ",";
+  json += "\"water\": " + String(water == 1 ? "true" : "false");
+  json += "}";
+
+  Serial.print("JSON terkirim: ");
+  Serial.println(json);
+
+  int code = http.POST(json);
+
+  Serial.print("Supabase Response Code: ");
+  Serial.println(code);
+
+  if (code == 200 || code == 201 || code == 204) {
+    Serial.println("Data BERHASIL dikirim!\n");
+  } else {
+    Serial.println("GAGAL mengirim data!\n");
+  }
+
+  http.end();
+}
