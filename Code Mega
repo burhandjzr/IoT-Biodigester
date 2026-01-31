@@ -1,0 +1,242 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <max6675.h>
+#include <MQ135.h>
+
+// ====================== PIN SENSOR ==========================
+#define methaneMQ2          A8
+#define pressureSensor1     A9
+#define pressureSensor2     A10
+#define phSensor            A11
+#define carbonMQ135         A12
+
+#define JUMLAH_SAMPLE_PH    20
+
+const byte tempSCK = 24;
+const byte tempCS  = 26;
+const byte tempSO  = 28;
+const byte levelSensor = 30;
+
+// ====================== RELAY OUTPUT ==========================
+const byte strobeRelay = 31;
+const byte valveRelay  = 33;
+const byte motorRelay  = 35;
+const byte buzzerPin   = 39;
+
+// ====================== LCD ==========================
+LiquidCrystal_I2C lcd1(0x27, 20, 4);
+LiquidCrystal_I2C lcd2(0x25, 20, 4);
+
+// ====================== Variabel ==========================
+int methanePPM = 0;
+int liquidLevel = 0;
+String kondisiTangki;
+
+int pressureAnalog1;
+int pressureAnalog2;
+float pressureValue1;
+float pressureValue2;
+
+float finalphValue;
+
+int temperatureValue;
+int carbonPPM;
+
+unsigned long lastSendTime = 0;
+const unsigned long intervalSend = 2000;
+
+unsigned long lastLCDUpdate = 0;
+const unsigned long lcdInterval = 500;
+
+// ====== TIMER SUHU ======
+unsigned long lastTempRead = 0;
+const unsigned long tempInterval = 400;
+
+MAX6675 thermocouple(tempSCK, tempCS, tempSO);
+MQ135 CO2Sensor(carbonMQ135);
+
+// ====================== TIMER MOTOR DC ========================
+unsigned long lastMotorRun = 0;
+bool motorIsRunning = false;
+
+const unsigned long motorInterval     = 10000UL;
+const unsigned long motorRunDuration  = 5000UL;
+
+
+// ====================== KIRIM RAW KE ESP32 ==========================
+void sendRAW() {
+  String data = "";
+
+  data += String(methanePPM) + " ";
+  data += String(carbonPPM) + " ";
+  data += String(temperatureValue) + " ";
+  data += String(finalphValue, 2) + " ";
+  data += String(pressureValue1, 2) + " ";
+  data += String(pressureValue2, 2) + " ";
+  data += String(liquidLevel);
+
+  Serial2.println(data);
+  Serial.println(data);
+}
+
+// ====================== SETUP ==========================
+void setup() {
+  Serial.begin(9600);
+  Serial2.begin(9600);
+
+  lcd1.init(); lcd1.backlight();
+  lcd2.init(); lcd2.backlight();
+
+  lcd1.setCursor(0, 0); lcd1.print("Tangki 1  : ");
+  lcd1.setCursor(0, 1); lcd1.print("Tekanan1  : ");
+  lcd1.setCursor(17,1); lcd1.print("Bar");
+  lcd1.setCursor(0, 2); lcd1.print("Suhu      : ");
+  lcd1.setCursor(18,2); lcd1.print((char)223); lcd1.print("C");
+  lcd1.setCursor(0, 3); lcd1.print("pH Limbah : ");
+
+  lcd2.setCursor(0, 0); lcd2.print("Metana  : ");
+  lcd2.setCursor(17,0); lcd2.print("PPM");
+  lcd2.setCursor(0, 1); lcd2.print("CO2     : ");
+  lcd2.setCursor(17,1); lcd2.print("PPM");
+  lcd2.setCursor(0, 2); lcd2.print("Tekanan2 : ");
+  lcd2.setCursor(17,2); lcd2.print("Bar");
+
+  pinMode(methaneMQ2, INPUT);
+  pinMode(pressureSensor1, INPUT);
+  pinMode(pressureSensor2, INPUT);
+  pinMode(phSensor, INPUT);
+  pinMode(carbonMQ135, INPUT);
+  pinMode(levelSensor, INPUT);
+
+  pinMode(strobeRelay, OUTPUT);
+  pinMode(valveRelay, OUTPUT);
+  pinMode(motorRelay, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  digitalWrite(strobeRelay, HIGH);
+  digitalWrite(valveRelay, LOW);
+  digitalWrite(motorRelay, LOW);
+  digitalWrite(buzzerPin, LOW);
+
+  int initTemp = thermocouple.readCelsius();
+  if (initTemp != -1 && initTemp != 0) {
+    temperatureValue = initTemp;
+  }
+
+  lastTempRead = millis();
+}
+
+// ====================== LOOP ==========================
+void loop() {
+  waterLevel();
+  SensMethane();
+  SenspH();
+
+  carbonPPM = CO2Sensor.getPPM();
+  pressure1();
+  pressure2();
+
+  if (millis() - lastTempRead >= tempInterval) {
+    int t = thermocouple.readCelsius();
+    if (t != -1 && t != 0) {
+      temperatureValue = t;
+    }
+    lastTempRead = millis();
+  }
+
+  if (carbonPPM > 10000) {
+    digitalWrite(strobeRelay, LOW);
+    digitalWrite(buzzerPin, HIGH);
+  } else {
+    digitalWrite(strobeRelay, HIGH);
+    digitalWrite(buzzerPin, LOW);
+  }
+
+  unsigned long now = millis();
+
+  if (liquidLevel == 1) {
+    digitalWrite(motorRelay, LOW);
+    motorIsRunning = false;
+  } else {
+    if (!motorIsRunning && (now - lastMotorRun >= motorInterval)) {
+      digitalWrite(motorRelay, HIGH);
+      motorIsRunning = true;
+      lastMotorRun = now;
+    }
+
+    if (motorIsRunning && (now - lastMotorRun >= motorRunDuration)) {
+      digitalWrite(motorRelay, LOW);
+      motorIsRunning = false;
+    }
+  }
+
+  bool phOK = (finalphValue >= 6.8 && finalphValue <= 8.0);
+  bool suhuOK = (temperatureValue >= 20 && temperatureValue <= 30);
+
+  if (phOK || suhuOK) {
+    digitalWrite(valveRelay, HIGH);
+  } else {
+    digitalWrite(valveRelay, LOW);
+  }
+
+  if (millis() - lastLCDUpdate >= lcdInterval) {
+    lcd1.setCursor(12, 0); lcd1.print(kondisiTangki + "   ");
+    lcd1.setCursor(12, 1); lcd1.print("     "); lcd1.setCursor(12,1); lcd1.print(pressureValue1);
+    lcd1.setCursor(12, 2); lcd1.print("     "); lcd1.setCursor(12,2); lcd1.print(temperatureValue);
+    lcd1.setCursor(12, 3); lcd1.print("     "); lcd1.setCursor(12,3); lcd1.print(finalphValue);
+
+    lcd2.setCursor(10, 0); lcd2.print("     "); lcd2.setCursor(10,0); lcd2.print(methanePPM);
+    lcd2.setCursor(10, 1); lcd2.print("     "); lcd2.setCursor(10,1); lcd2.print(carbonPPM);
+    lcd2.setCursor(10, 2); lcd2.print("     "); lcd2.setCursor(10,2); lcd2.print(pressureValue2);
+
+    lastLCDUpdate = millis();
+  }
+
+  if (millis() - lastSendTime >= intervalSend) {
+    sendRAW();
+    lastSendTime = millis();
+  }
+}
+
+// ====================== SENSOR ==========================
+float pressure(int pressureValue) {
+  float voltage = (pressureValue * 5.0) / 1024.0;
+  float pressurePascal = (3.0 * (voltage - 0.47)) * 1000000.0;
+  return pressurePascal / 10e5;
+}
+
+void pressure1() {
+  pressureAnalog1 = analogRead(pressureSensor1);
+  pressureValue1 = pressure(pressureAnalog1);
+}
+
+void pressure2() {
+  pressureAnalog2 = analogRead(pressureSensor2);
+  pressureValue2 = pressure(pressureAnalog2);
+}
+
+void waterLevel() {
+  liquidLevel = digitalRead(levelSensor);
+  kondisiTangki = (liquidLevel == 1) ? "Penuh" : "Kosong";
+}
+
+void SensMethane() {
+  int methaneGas = analogRead(methaneMQ2);
+  float CH4Voltage = methaneGas * (5.0 / 1023.0);
+  methanePPM = (15000 / 1024) * ((CH4Voltage / 5.0) * 1024);
+}
+
+// ====================== SENSOR pH (DIPERBAIKI) ======================
+void SenspH() {
+  long totalADC = 0;
+
+  for (int i = 0; i < JUMLAH_SAMPLE_PH; i++) {
+    totalADC += analogRead(phSensor);
+    delay(10);
+  }
+
+  float adcAverage = totalADC / (float)JUMLAH_SAMPLE_PH;
+  float voltage = adcAverage * (5.0 / 1023.0);
+
+  finalphValue = 7.0 + ((2.5 - voltage) * 3.5);
+}
